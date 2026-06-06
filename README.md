@@ -7,22 +7,23 @@ This is a tiny local bridge that reads the chat from it, translates each message
 and serves a clean live web page — so you can read what everyone's saying,
 whatever language they're typing in.
 
-No API key. No accounts. No npm install. Just Node.
+No API key. No accounts.
 
-## Requirements
+## Download (Windows — no install)
 
-- [Node.js](https://nodejs.org) 18 or newer
-- War Thunder running (it's what serves `localhost:8111`)
+Grab **`wt-translator-bridge.exe`** from the [latest release](https://github.com/Horizon-StudiosAU/wt-translator-bridge/releases/latest), double‑click it, then open **http://localhost:8123** and spawn into a match. No Node required.
 
-## Run
+> Windows may show a SmartScreen "unknown publisher" warning (the build is unsigned) — click **More info → Run anyway**.
+
+## Run from source (any OS)
+
+Requires [Node.js](https://nodejs.org) 18+ and War Thunder running:
 
 ```bash
 node wt-chat-translate.mjs
 ```
 
-Then open **http://localhost:8123** and spawn into a match. Chat appears
-translated in real time, with the original text and detected language under each
-line.
+Then open **http://localhost:8123**. Chat appears translated in real time, with the original text and detected language under each line.
 
 ## Options
 
