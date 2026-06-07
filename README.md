@@ -37,12 +37,28 @@ Set these environment variables before running:
 
 Example: `WT_TARGET_LANG=de node wt-chat-translate.mjs`
 
+## Flight telemetry feed (for FoxThree Live Ops)
+
+Besides chat, the bridge merges War Thunder's read‑only telemetry into a few
+JSON endpoints that power the live dashboard on
+[FoxThree](https://foxthree.horizonstudios.io/live):
+
+| Endpoint | What it serves |
+|----------|----------------|
+| `/api/telemetry` | own altitude / TAS / IAS / Mach / G / climb / throttle / fuel + range & aspect to the nearest contact |
+| `/api/contacts` | live map objects (you, allies, enemies, bases) in normalized map space |
+| `/api/hudmsg` | rolling combat log (kills / crashes / damage) |
+| `/api/map.img` | the live tactical map image (JPEG proxy) |
+
+All read‑only — the bridge never writes anything back into the game.
+
 ## How it works
 
 - Polls `http://localhost:8111/gamechat` (the game's local server) every ~1.5 s.
 - Detects each message's language and translates it.
 - Serves the live UI at `http://localhost:8123`, plus a small JSON feed
-  (`/api/lines`) and a reverse‑translate endpoint (`/api/translate?q=…&tl=…`).
+  (`/api/lines`), a reverse‑translate endpoint (`/api/translate?q=…&tl=…`), and
+  the telemetry endpoints above.
 
 Everything runs on your machine. The only thing sent out is the chat **text**,
 to Google's public translate endpoint, for translation. To use a different

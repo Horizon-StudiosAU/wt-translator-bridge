@@ -1,3 +1,9 @@
 node_modules/
 *.log
 .DS_Store
+
+# build artifacts (.exe is a release asset, not committed)
+*.exe
+sea-prep.blob
+sea-entry.cjs
+sea-config.json

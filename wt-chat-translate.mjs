@@ -92,6 +92,221 @@ async function poll() {
 setInterval(poll, CONFIG.pollMs);
 poll();
 
+// Flight telemetry: own state + range/aspect to the nearest contact, plus the
+// raw map objects (tactical overlay) and a combat-log feed. All read-only.
+
+const TELEM_POLL_MS = 500;
+let telemetry = {
+  reachable: false,
+  gameLive: false,
+  ownAltM: null,
+  ownSpeedMs: null,
+  ownIasMs: null,
+  ownMach: null,
+  ownVyMs: null,
+  ownG: null,
+  ownThrottlePct: null,
+  fuelKg: null,
+  fuelPct: null,
+  hasTarget: false,
+  rangeM: null,
+  aspectDeg: null,
+  targetCount: 0,
+  mapSizeM: null,
+  error: null,
+};
+let contacts = { reachable: false, objects: [], mapSizeM: null, gridStepM: null };
+
+async function wtJson(path) {
+  const r = await fetch(`${CONFIG.wtHost}${path}`, { signal: AbortSignal.timeout(2500) });
+  if (!r.ok) throw new Error(`HTTP ${r.status} ${path}`);
+  return r.json();
+}
+
+function numKey(obj, key) {
+  const v = obj && typeof obj === "object" ? obj[key] : undefined;
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function numKeyAny(obj, keys) {
+  for (const k of keys) {
+    const v = numKey(obj, k);
+    if (v !== null) return v;
+  }
+  return null;
+}
+
+function wrap180(deg) {
+  return (((deg % 360) + 540) % 360) - 180;
+}
+
+function contactGeometry(objs, sizeX, sizeY) {
+  const own = objs.find((o) => o && o.icon === "Player");
+  const aircraft = objs.filter((o) => o && o.type === "aircraft" && o.icon !== "Player");
+  if (!own || typeof own.x !== "number" || typeof own.y !== "number") {
+    return { count: aircraft.length, enemy: null };
+  }
+  let best = null;
+  let bestD = Infinity;
+  for (const e of aircraft) {
+    if (typeof e.x !== "number" || typeof e.y !== "number") continue;
+    const dxm = (e.x - own.x) * sizeX;
+    const dym = (e.y - own.y) * sizeY;
+    const d = Math.hypot(dxm, dym);
+    if (d < bestD) {
+      bestD = d;
+      best = e;
+    }
+  }
+  if (!best) return { count: aircraft.length, enemy: null };
+  let aspectDeg = null;
+  if (typeof best.dx === "number" && typeof best.dy === "number" && (best.dx !== 0 || best.dy !== 0)) {
+    const headingDeg = (Math.atan2(best.dy, best.dx) * 180) / Math.PI;
+    const losBackDeg = (Math.atan2(own.y - best.y, own.x - best.x) * 180) / Math.PI;
+    aspectDeg = Math.abs(wrap180(headingDeg - losBackDeg));
+  }
+  return { count: aircraft.length, enemy: best, rangeM: bestD, aspectDeg };
+}
+
+async function pollTelemetry() {
+  try {
+    const [state, mapObj, mapInfo] = await Promise.all([
+      wtJson("/state").catch(() => null),
+      wtJson("/map_obj.json").catch(() => null),
+      wtJson("/map_info.json").catch(() => null),
+    ]);
+
+    const valid = state ? state.valid !== false : false;
+    const ownAltM = numKey(state, "H, m");
+    const tasKmh = numKey(state, "TAS, km/h");
+    const iasKmh = numKey(state, "IAS, km/h");
+    const fuelKg = numKeyAny(state, ["Mfuel, kg", "fuel, kg"]);
+    const fuelMaxKg = numKey(state, "Mfuel0, kg");
+
+    let sizeX = null;
+    let sizeY = null;
+    let gridStepM = null;
+    if (mapInfo && Array.isArray(mapInfo.map_min) && Array.isArray(mapInfo.map_max)) {
+      sizeX = Math.abs(mapInfo.map_max[0] - mapInfo.map_min[0]) || null;
+      sizeY = Math.abs(mapInfo.map_max[1] - mapInfo.map_min[1]) || sizeX;
+    }
+    if (mapInfo && Array.isArray(mapInfo.grid_steps)) {
+      gridStepM = Number(mapInfo.grid_steps[0]) || null;
+    }
+
+    let hasTarget = false;
+    let rangeM = null;
+    let aspectDeg = null;
+    let targetCount = 0;
+    if (Array.isArray(mapObj) && sizeX) {
+      const geo = contactGeometry(mapObj, sizeX, sizeY);
+      targetCount = geo.count;
+      if (geo.enemy) {
+        hasTarget = true;
+        rangeM = geo.rangeM;
+        aspectDeg = geo.aspectDeg;
+      }
+    }
+
+    contacts = {
+      reachable: true,
+      objects: Array.isArray(mapObj)
+        ? mapObj
+            .filter((o) => o && typeof o.x === "number" && typeof o.y === "number")
+            .slice(0, 200)
+            .map((o) => ({
+              type: typeof o.type === "string" ? o.type : "",
+              icon: typeof o.icon === "string" ? o.icon : "",
+              color: typeof o.color === "string" ? o.color : "#ffffff",
+              x: o.x,
+              y: o.y,
+              dx: typeof o.dx === "number" ? o.dx : 0,
+              dy: typeof o.dy === "number" ? o.dy : 0,
+              isPlayer: o.icon === "Player",
+            }))
+        : [],
+      mapSizeM: sizeX,
+      gridStepM,
+    };
+
+    telemetry = {
+      reachable: true,
+      gameLive: valid && ownAltM !== null,
+      ownAltM,
+      ownSpeedMs: tasKmh != null ? tasKmh / 3.6 : null,
+      ownIasMs: iasKmh != null ? iasKmh / 3.6 : null,
+      ownMach: numKey(state, "M"),
+      ownVyMs: numKey(state, "Vy, m/s"),
+      ownG: numKeyAny(state, ["Ny", "Nya"]),
+      ownThrottlePct: numKeyAny(state, ["throttle 1, %", "throttle, %"]),
+      fuelKg,
+      fuelPct: fuelKg != null && fuelMaxKg ? Math.round((fuelKg / fuelMaxKg) * 100) : null,
+      hasTarget,
+      rangeM,
+      aspectDeg,
+      targetCount,
+      mapSizeM: sizeX,
+      error: null,
+    };
+  } catch (e) {
+    telemetry = {
+      ...telemetry,
+      reachable: false,
+      gameLive: false,
+      hasTarget: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+    contacts = { ...contacts, reachable: false };
+  }
+}
+
+setInterval(pollTelemetry, TELEM_POLL_MS);
+pollTelemetry();
+
+const HUD_POLL_MS = 1000;
+let hudFeed = [];
+let lastEvtId = 0;
+let lastDmgId = 0;
+
+async function pollHud() {
+  let data;
+  try {
+    data = await wtJson(`/hudmsg?lastEvt=${lastEvtId}&lastDmg=${lastDmgId}`);
+  } catch {
+    return;
+  }
+  const push = (arr, kind) => {
+    if (!Array.isArray(arr)) return;
+    for (const e of arr) {
+      if (!e || typeof e.id !== "number") continue;
+      const msg = (e.msg || "").replace(/<\/?color[^>]*>/gi, "").trim();
+      hudFeed.push({
+        id: `${kind}-${e.id}`,
+        kind,
+        msg,
+        sender: e.sender || "",
+        enemy: !!e.enemy,
+        time: typeof e.time === "number" ? e.time : null,
+      });
+      if (kind === "event") lastEvtId = Math.max(lastEvtId, e.id);
+      else lastDmgId = Math.max(lastDmgId, e.id);
+    }
+  };
+  if (data && (data.events?.[0]?.id ?? Infinity) < lastEvtId) {
+    hudFeed = [];
+    lastEvtId = 0;
+    lastDmgId = 0;
+  }
+  if (data) {
+    push(data.events, "event");
+    push(data.damage, "damage");
+  }
+  while (hudFeed.length > 120) hudFeed.shift();
+}
+
+setInterval(pollHud, HUD_POLL_MS);
+pollHud();
+
 const HTML = String.raw`<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -198,14 +413,46 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (u.pathname === "/api/telemetry") {
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    res.end(JSON.stringify(telemetry));
+    return;
+  }
+
+  if (u.pathname === "/api/contacts") {
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    res.end(JSON.stringify(contacts));
+    return;
+  }
+
+  if (u.pathname === "/api/hudmsg") {
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    res.end(JSON.stringify({ feed: hudFeed }));
+    return;
+  }
+
+  if (u.pathname === "/api/map.img") {
+    try {
+      const r = await fetch(`${CONFIG.wtHost}/map.img`, { signal: AbortSignal.timeout(3000) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const buf = Buffer.from(await r.arrayBuffer());
+      res.writeHead(200, { "content-type": "image/jpeg", "cache-control": "no-store" });
+      res.end(buf);
+    } catch {
+      res.writeHead(502, { "content-type": "text/plain" });
+      res.end("map unavailable");
+    }
+    return;
+  }
+
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   res.end(HTML);
 });
 
 server.listen(CONFIG.port, () => {
   process.stdout.write(
-    `\nWT Chat Translator running\n  UI:     http://localhost:${CONFIG.port}\n` +
-      `  WT:     ${CONFIG.wtHost}/gamechat\n  Target: ${CONFIG.targetLang}\n\n` +
+    `\nWT Translator Bridge running\n  UI:     http://localhost:${CONFIG.port}\n` +
+      `  WT:     ${CONFIG.wtHost}\n  Target: ${CONFIG.targetLang}\n\n` +
       `Open the UI and spawn into a match. Ctrl+C to stop.\n`,
   );
 });
